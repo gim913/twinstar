@@ -351,7 +351,7 @@ impl Document {
 }
 
 impl fmt::Display for Document {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for item in &self.items {
             match item {
                 Item::Text(text) => writeln!(f, "{}", text.0)?,

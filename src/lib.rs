@@ -6,18 +6,20 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use futures_core::future::BoxFuture;
 use lazy_static::lazy_static;
 use routing::RoutingNode;
-use rustls::internal::msgs::handshake::DigitallySignedStruct;
-use rustls::ClientCertVerifier;
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::pki_types::{PrivateKeyDer, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::DigitallySignedStruct;
 use rustls::*;
 use std::{
     convert::TryFrom, io::BufReader, panic::AssertUnwindSafe, path::PathBuf, sync::Arc,
     time::Duration,
 };
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::{
     io::{self, BufStream},
     net::{TcpStream, ToSocketAddrs},
-    prelude::*,
     time::timeout,
 };
 use tokio_rustls::{rustls, TlsAcceptor};
@@ -97,12 +99,12 @@ impl Server {
             .get_ref()
             .get_ref()
             .1
-            .get_peer_certificates()
-            .and_then(|mut v| {
+            .peer_certificates()
+            .and_then(|v| {
                 if v.is_empty() {
                     None
                 } else {
-                    Some(v.remove(0))
+                    Some(v[0].clone())
                 }
             });
 
@@ -413,39 +415,41 @@ async fn send_response_body(body: Body, stream: &mut (impl AsyncWrite + Unpin)) 
 }
 
 fn tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<Arc<ServerConfig>> {
-    let mut config = ServerConfig::new(AllowAnonOrSelfsignedClient::new());
-
     let cert_chain = load_cert_chain(cert_path).context("Failed to load TLS certificate")?;
-    let key = load_key(key_path).context("Failed to load TLS key")?;
-    config
-        .set_single_cert(cert_chain, key)
-        .context("Failed to use loaded TLS certificate")?;
+    let key_der = load_key(key_path).context("Failed to load TLS key")?;
 
-    Ok(config.into())
+    let config = ServerConfig::builder()
+        .with_client_cert_verifier(AllowAnonOrSelfsignedClient::new())
+        .with_single_cert(cert_chain, key_der.clone_key())
+        .unwrap();
+
+    Ok(Arc::new(config))
 }
 
-fn load_cert_chain(cert_path: &PathBuf) -> Result<Vec<Certificate>> {
+fn load_cert_chain(cert_path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
     let certs = std::fs::File::open(cert_path)
         .with_context(|| format!("Failed to open `{:?}`", cert_path))?;
     let mut certs = BufReader::new(certs);
-    let certs = rustls::internal::pemfile::certs(&mut certs)
+    let certs = rustls_pemfile::certs(&mut certs)
+        .collect::<Result<_, std::io::Error>>()
         .map_err(|_| anyhow!("failed to load certs `{:?}`", cert_path))?;
 
     Ok(certs)
 }
 
-fn load_key(key_path: &PathBuf) -> Result<PrivateKey> {
+fn load_key(key_path: &PathBuf) -> Result<PrivateKeyDer<'static>> {
     let keys = std::fs::File::open(key_path)
         .with_context(|| format!("Failed to open `{:?}`", key_path))?;
     let mut keys = BufReader::new(keys);
-    let mut keys = rustls::internal::pemfile::pkcs8_private_keys(&mut keys)
+    let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut keys)
+        .collect::<Result<_, std::io::Error>>()
         .map_err(|_| anyhow!("failed to load key `{:?}`", key_path))?;
 
     ensure!(!keys.is_empty(), "no key found");
 
     let key = keys.swap_remove(0);
 
-    Ok(key)
+    Ok(PrivateKeyDer::Pkcs8(key))
 }
 
 /// Mime for Gemini documents
@@ -465,6 +469,7 @@ pub fn gemini_mime() -> Result<Mime> {
 ///
 /// Unfortunately, rustls doesn't provide a ClientCertVerifier that accepts self-signed
 /// certificates, so we need to implement this ourselves.
+#[derive(Debug)]
 struct AllowAnonOrSelfsignedClient {}
 impl AllowAnonOrSelfsignedClient {
     /// Create a new verifier
@@ -474,40 +479,55 @@ impl AllowAnonOrSelfsignedClient {
 }
 
 impl ClientCertVerifier for AllowAnonOrSelfsignedClient {
-    fn client_auth_root_subjects(&self, _: Option<&webpki::DNSName>) -> Option<DistinguishedNames> {
-        Some(Vec::new())
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
     }
-
-    fn client_auth_mandatory(&self, _sni: Option<&webpki::DNSName>) -> Option<bool> {
-        Some(false)
-    }
-
-    // the below methods are a hack until webpki doesn't break with certain certs
 
     fn verify_client_cert(
         &self,
-        _: &[Certificate],
-        _: Option<&webpki::DNSName>,
-    ) -> Result<ClientCertVerified, TLSError> {
+        _: &CertificateDer,
+        _: &[CertificateDer],
+        _: UnixTime,
+    ) -> Result<ClientCertVerified, Error> {
         Ok(ClientCertVerified::assertion())
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
     }
 
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &Certificate,
+        _cert: &CertificateDer,
         _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, TLSError> {
+    ) -> Result<HandshakeSignatureValid, Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &Certificate,
+        _mess: &[u8],
+        _cert: &pki_types::CertificateDer,
         _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, TLSError> {
+    ) -> Result<HandshakeSignatureValid, Error> {
         Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
     }
 }
 

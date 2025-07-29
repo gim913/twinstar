@@ -5,7 +5,7 @@ use log::LevelFilter;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use twinstar::{Certificate, Request, Response, Server, GEMINI_PORT};
+use twinstar::{Request, Response, Server, GEMINI_PORT};
 
 // Workaround for Certificates not being hashable
 type CertBytes = Vec<u8>;
@@ -36,10 +36,12 @@ fn handle_request(
     request: Request,
 ) -> BoxFuture<'static, Result<Response>> {
     async move {
-        if let Some(Certificate(cert_bytes)) = request.certificate() {
+        if request.certificate().is_some() {
+            let cert_bytes = request.certificate().unwrap().to_vec();
+
             // The user provided a certificate
             let users_read = users.read().await;
-            if let Some(user) = users_read.get(cert_bytes) {
+            if let Some(user) = users_read.get(&cert_bytes) {
                 // The user has already registered
                 Ok(Response::success_gemini(format!("Welcome {}!", user)))
             } else {
@@ -49,7 +51,7 @@ fn handle_request(
                     // The user provided some input (a username request)
                     let username = query_part.as_str();
                     let mut users_write = users.write().await;
-                    users_write.insert(cert_bytes.clone(), username.to_owned());
+                    users_write.insert(cert_bytes, username.to_owned());
                     Ok(Response::success_gemini(format!(
                         "Your account has been created {}!  Welcome!",
                         username

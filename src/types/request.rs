@@ -1,13 +1,13 @@
 use anyhow::*;
 use percent_encoding::percent_decode_str;
-use rustls::Certificate;
+use rustls::pki_types::CertificateDer;
 use std::ops;
 use uriparse::URIReference;
 
 pub struct Request {
     uri: URIReference<'static>,
     input: Option<String>,
-    certificate: Option<Certificate>,
+    certificate: Option<CertificateDer<'static>>,
     trailing_segments: Option<Vec<String>>,
 }
 
@@ -18,7 +18,7 @@ impl Request {
 
     pub fn with_certificate(
         mut uri: URIReference<'static>,
-        certificate: Option<Certificate>,
+        certificate: Option<CertificateDer<'static>>,
     ) -> Result<Self> {
         uri.normalize();
 
@@ -41,7 +41,7 @@ impl Request {
         })
     }
 
-    pub const fn uri(&self) -> &URIReference {
+    pub const fn uri(&self) -> &URIReference<'_> {
         &self.uri
     }
 
@@ -87,7 +87,7 @@ impl Request {
         self.input.as_deref()
     }
 
-    pub fn set_cert(&mut self, cert: Option<Certificate>) {
+    pub fn set_cert(&mut self, cert: Option<CertificateDer<'static>>) {
         self.certificate = cert;
     }
 
@@ -96,7 +96,7 @@ impl Request {
     }
 
     #[allow(clippy::missing_const_for_fn)]
-    pub fn certificate(&self) -> Option<&Certificate> {
+    pub fn certificate(&self) -> Option<&CertificateDer<'_>> {
         self.certificate.as_ref()
     }
 }
