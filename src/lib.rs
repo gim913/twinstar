@@ -2,7 +2,7 @@
 extern crate log;
 
 use crate::util::opt_timeout;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_core::future::BoxFuture;
 use lazy_static::lazy_static;
 use routing::RoutingNode;
@@ -86,7 +86,15 @@ impl Server {
             .await
             .context("Client timed out while waiting for response")??;
 
-        debug!("Client requested: {}", request.uri());
+        let server_name = stream.get_ref().get_ref().1.server_name();
+
+        if let Some(name) = server_name {
+            debug!("[{}] Client requested: {}", name, request.uri());
+        } else {
+            debug!("[] Client requested: {}", request.uri());
+        }
+
+        request.set_server_name(server_name.map(str::to_string));
 
         // Identify the client certificate from the tls stream.  This is the first
         // certificate in the certificate chain.

@@ -5,6 +5,7 @@ use std::ops;
 use uriparse::URIReference;
 
 pub struct Request {
+    server_name: Option<String>,
     uri: URIReference<'static>,
     input: Option<String>,
     certificate: Option<CertificateDer<'static>>,
@@ -34,11 +35,16 @@ impl Request {
         };
 
         Ok(Self {
+            server_name: None,
             uri,
             input,
             certificate,
             trailing_segments: None,
         })
+    }
+
+    pub const fn server_name(&self) -> Option<&String> {
+        self.server_name.as_ref()
     }
 
     pub const fn uri(&self) -> &URIReference<'_> {
@@ -89,6 +95,10 @@ impl Request {
 
     pub fn set_cert(&mut self, cert: Option<CertificateDer<'static>>) {
         self.certificate = cert;
+    }
+
+    pub fn set_server_name(&mut self, server_name: Option<String>) {
+        self.server_name = server_name
     }
 
     pub fn set_trailing(&mut self, segments: Vec<String>) {
