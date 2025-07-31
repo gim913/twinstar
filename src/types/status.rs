@@ -1,4 +1,4 @@
-#[derive(Debug,Copy,Clone,PartialEq,Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Status(u8);
 
 impl Status {
@@ -45,7 +45,7 @@ impl Status {
     }
 }
 
-#[derive(Copy,Clone,PartialEq,Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum StatusCategory {
     Input,
     Success,

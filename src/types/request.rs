@@ -1,8 +1,8 @@
-use std::ops;
 use anyhow::*;
 use percent_encoding::percent_decode_str;
-use uriparse::URIReference;
 use rustls::Certificate;
+use std::ops;
+use uriparse::URIReference;
 
 pub struct Request {
     uri: URIReference<'static>,
@@ -18,7 +18,7 @@ impl Request {
 
     pub fn with_certificate(
         mut uri: URIReference<'static>,
-        certificate: Option<Certificate>
+        certificate: Option<Certificate>,
     ) -> Result<Self> {
         uri.normalize();
 
@@ -75,7 +75,11 @@ impl Request {
             .path()
             .segments()
             .iter()
-            .map(|segment| percent_decode_str(segment.as_str()).decode_utf8_lossy().into_owned())
+            .map(|segment| {
+                percent_decode_str(segment.as_str())
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
             .collect::<Vec<String>>()
     }
 
