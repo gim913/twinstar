@@ -94,8 +94,6 @@ impl Server {
             debug!("[] Client requested: {}", request.uri());
         }
 
-        request.set_server_name(server_name.map(str::to_string));
-
         // Identify the client certificate from the tls stream.  This is the first
         // certificate in the certificate chain.
         let client_cert = stream
@@ -111,7 +109,17 @@ impl Server {
                 }
             });
 
+        request.set_server_name(server_name.map(str::to_string));
         request.set_cert(client_cert);
+        request.set_peer(
+            stream
+                .get_ref()
+                .get_ref()
+                .0
+                .peer_addr()
+                .ok()
+                .map(|a| a.to_string()),
+        );
 
         let response = if let Some((trailing, handler)) = self.routes.match_request(&request) {
             request.set_trailing(trailing);

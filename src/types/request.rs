@@ -5,11 +5,13 @@ use std::ops;
 use uriparse::URIReference;
 
 pub struct Request {
-    server_name: Option<String>,
     uri: URIReference<'static>,
     input: Option<String>,
-    certificate: Option<CertificateDer<'static>>,
     trailing_segments: Option<Vec<String>>,
+
+    server_name: Option<String>,
+    certificate: Option<CertificateDer<'static>>,
+    peer_addr: Option<String>,
 }
 
 impl Request {
@@ -35,16 +37,14 @@ impl Request {
         };
 
         Ok(Self {
-            server_name: None,
             uri,
             input,
-            certificate,
             trailing_segments: None,
-        })
-    }
 
-    pub const fn server_name(&self) -> Option<&String> {
-        self.server_name.as_ref()
+            server_name: None,
+            certificate,
+            peer_addr: None,
+        })
     }
 
     pub const fn uri(&self) -> &URIReference<'_> {
@@ -93,21 +93,33 @@ impl Request {
         self.input.as_deref()
     }
 
+    pub fn set_server_name(&mut self, server_name: Option<String>) {
+        self.server_name = server_name
+    }
+
     pub fn set_cert(&mut self, cert: Option<CertificateDer<'static>>) {
         self.certificate = cert;
     }
 
-    pub fn set_server_name(&mut self, server_name: Option<String>) {
-        self.server_name = server_name
+    pub fn set_peer(&mut self, peer_addr: Option<String>) {
+        self.peer_addr = peer_addr;
     }
 
     pub fn set_trailing(&mut self, segments: Vec<String>) {
         self.trailing_segments = Some(segments);
     }
 
+    pub const fn server_name(&self) -> Option<&String> {
+        self.server_name.as_ref()
+    }
+
     #[allow(clippy::missing_const_for_fn)]
     pub fn certificate(&self) -> Option<&CertificateDer<'_>> {
         self.certificate.as_ref()
+    }
+
+    pub const fn peer_addr(&self) -> Option<&String> {
+        self.peer_addr.as_ref()
     }
 }
 
