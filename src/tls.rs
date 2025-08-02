@@ -1,12 +1,12 @@
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, ensure};
 use rustls::sign::CertifiedKey;
+use rustls::{DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme};
 use rustls::{
     client::danger::HandshakeSignatureValid,
     pki_types::{CertificateDer, PrivateKeyDer, UnixTime},
-    server::danger::{ClientCertVerified, ClientCertVerifier},
     server::ResolvesServerCertUsingSni,
+    server::danger::{ClientCertVerified, ClientCertVerifier},
 };
-use rustls::{DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme};
 use std::{collections::HashMap, io::BufReader, path::PathBuf, sync::Arc};
 
 pub fn tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<Arc<ServerConfig>> {
@@ -132,6 +132,9 @@ impl ClientCertVerifier for AllowAnonOrSelfsignedClient {
             SignatureScheme::RSA_PSS_SHA512,
             SignatureScheme::ED25519,
             SignatureScheme::ED448,
+            // temporarily
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
         ]
     }
 }
