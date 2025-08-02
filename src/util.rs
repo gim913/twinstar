@@ -153,10 +153,16 @@ pub async fn serve_dir_listing<P: AsRef<Path>, B: AsRef<Path>>(
         },
     };
 
-    let breadcrumbs: PathBuf = virtual_path.iter().collect();
+    // This was nice and elegant virtual_path.iter().collect() earlier,
+    // but the problem is this is using os::SEPARATOR, to join elements,
+    // so this looks bad on Windows, so use '/' everywhere
+    let breadcrumbs: String = virtual_path
+        .iter()
+        .map(|e| e.as_ref().to_str().unwrap())
+        .fold(String::new(), |a, b| a + "/" + b);
     let mut document = Document::new();
 
-    document.add_heading(H1, format!("Index of /{}", breadcrumbs.display()));
+    document.add_heading(H1, format!("Index of {}", breadcrumbs));
     document.add_blank_line();
 
     if virtual_path.get(0).map(<_>::as_ref) != Some(Path::new("")) {
