@@ -37,11 +37,17 @@ pub async fn serve_file<P: AsRef<Path>>(path: P, mime: &Mime) -> Result<Response
     Ok(Response::success(mime, file))
 }
 
+pub enum ResolveResult {
+    Path(PathBuf),
+    Response(Response),
+}
+
 #[cfg(feature = "serve_dir")]
-pub async fn serve_dir<D: AsRef<Path>, P: AsRef<Path>>(
+pub fn resolve_virtual_path<D: AsRef<Path>, P: AsRef<Path>>(
     dir: D,
     virtual_path: &[P],
-) -> Result<Response> {
+) -> ResolveResult {
+    // Check server directory
     debug!("Dir: {}", dir.as_ref().display());
     let dir = dir.as_ref();
     let dir = match dir.canonicalize() {
@@ -52,29 +58,38 @@ pub async fn serve_dir<D: AsRef<Path>, P: AsRef<Path>>(
                     "Path {} not found.  Check your configuration.",
                     dir.display()
                 );
-                return Response::server_error("Server incorrectly configured");
+                return ResolveResult::Response(
+                    Response::server_error("Server incorrectly configured").unwrap(),
+                );
             }
             std::io::ErrorKind::PermissionDenied => {
                 warn!(
                     "Permission denied for {}.  Check that the server has access.",
                     dir.display()
                 );
-                return Response::server_error("Server incorrectly configured");
+                return ResolveResult::Response(
+                    Response::server_error("Server incorrectly configured").unwrap(),
+                );
             }
-            _ => return warn_unexpected(e, dir, line!()),
+            _ => return ResolveResult::Response(warn_unexpected(e, dir, line!()).unwrap()),
         },
     };
-    let mut path = dir.to_path_buf();
 
+    // Virtual path is an uri, that - when coming from the server - is already normalized,
+    // so fragment below  will create proper path that is "below" base `dir`.
+    let mut path = dir.to_path_buf();
     for segment in virtual_path {
         path.push(segment);
     }
 
+    // Check virtual path inside filesystem.
     let path = match path.canonicalize() {
         Ok(dir) => dir,
         Err(e) => {
             match e.kind() {
-                std::io::ErrorKind::NotFound => return Ok(Response::not_found()),
+                std::io::ErrorKind::NotFound => {
+                    return ResolveResult::Response(Response::not_found());
+                }
                 std::io::ErrorKind::PermissionDenied => {
                     // Runs when asked to serve a file in a restricted dir
                     // i.e. not /noaccess, but /noaccess/file
@@ -82,16 +97,33 @@ pub async fn serve_dir<D: AsRef<Path>, P: AsRef<Path>>(
                         "Asked to serve {}, but permission denied by OS",
                         path.display()
                     );
-                    return Ok(Response::not_found());
+                    return ResolveResult::Response(Response::not_found());
                 }
-                _ => return warn_unexpected(e, path.as_ref(), line!()),
+                _ => {
+                    return ResolveResult::Response(
+                        warn_unexpected(e, path.as_ref(), line!()).unwrap(),
+                    );
+                }
             }
         }
     };
 
     if !path.starts_with(&dir) {
-        return Ok(Response::not_found());
+        return ResolveResult::Response(Response::not_found());
     }
+
+    ResolveResult::Path(path)
+}
+
+#[cfg(feature = "serve_dir")]
+pub async fn serve_dir<D: AsRef<Path>, P: AsRef<Path>>(
+    dir: D,
+    virtual_path: &[P],
+) -> Result<Response> {
+    let path = match resolve_virtual_path(dir, virtual_path) {
+        ResolveResult::Path(path_buf) => path_buf,
+        ResolveResult::Response(response) => return Ok(response),
+    };
 
     if !path.is_dir() {
         let mime = guess_mime_from_path(&path);
@@ -102,7 +134,7 @@ pub async fn serve_dir<D: AsRef<Path>, P: AsRef<Path>>(
 }
 
 #[cfg(feature = "serve_dir")]
-async fn serve_dir_listing<P: AsRef<Path>, B: AsRef<Path>>(
+pub async fn serve_dir_listing<P: AsRef<Path>, B: AsRef<Path>>(
     path: P,
     virtual_path: &[B],
 ) -> Result<Response> {
