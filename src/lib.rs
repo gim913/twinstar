@@ -2,29 +2,24 @@
 extern crate log;
 
 use crate::util::opt_timeout;
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_core::future::BoxFuture;
 use lazy_static::lazy_static;
 use routing::RoutingNode;
-use rustls::client::danger::HandshakeSignatureValid;
-use rustls::pki_types::{PrivateKeyDer, UnixTime};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::DigitallySignedStruct;
-use rustls::*;
 use std::{
-    convert::TryFrom, io::BufReader, panic::AssertUnwindSafe, path::PathBuf, sync::Arc,
-    time::Duration,
+    collections::HashMap, convert::TryFrom, iter::FromIterator, panic::AssertUnwindSafe,
+    path::PathBuf, sync::Arc, time::Duration,
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tls::{tls_config, tls_sni_config};
 use tokio::{
-    io::{self, BufStream},
-    net::{TcpStream, ToSocketAddrs},
+    io::{self, AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
     time::timeout,
 };
-use tokio_rustls::{rustls, TlsAcceptor};
+use tokio_rustls::TlsAcceptor;
 
 pub mod routing;
+pub mod tls;
 pub mod types;
 pub mod util;
 
@@ -91,7 +86,13 @@ impl Server {
             .await
             .context("Client timed out while waiting for response")??;
 
-        debug!("Client requested: {}", request.uri());
+        let server_name = stream.get_ref().get_ref().1.server_name();
+
+        if let Some(name) = server_name {
+            debug!("[{}] Client requested: {}", name, request.uri());
+        } else {
+            debug!("[] Client requested: {}", request.uri());
+        }
 
         // Identify the client certificate from the tls stream.  This is the first
         // certificate in the certificate chain.
@@ -108,7 +109,17 @@ impl Server {
                 }
             });
 
+        request.set_server_name(server_name.map(str::to_string));
         request.set_cert(client_cert);
+        request.set_peer(
+            stream
+                .get_ref()
+                .get_ref()
+                .0
+                .peer_addr()
+                .ok()
+                .map(|a| a.to_string()),
+        );
 
         let response = if let Some((trailing, handler)) = self.routes.match_request(&request) {
             request.set_trailing(trailing);
@@ -193,8 +204,11 @@ impl Server {
 
 pub struct Builder<A> {
     addr: A,
+
     cert_path: PathBuf,
     key_path: PathBuf,
+    cert_key_mapping: Option<HashMap<String, (PathBuf, PathBuf)>>,
+
     timeout: Duration,
     complex_body_timeout_override: Option<Duration>,
     routes: RoutingNode<Handler>,
@@ -208,6 +222,7 @@ impl<A: ToSocketAddrs> Builder<A> {
             complex_body_timeout_override: Some(Duration::from_secs(30)),
             cert_path: PathBuf::from("cert/cert.pem"),
             key_path: PathBuf::from("cert/key.pem"),
+            cert_key_mapping: None,
             routes: RoutingNode::default(),
         }
     }
@@ -249,6 +264,25 @@ impl<A: ToSocketAddrs> Builder<A> {
     /// [`set_cert()`](Self::set_cert())
     pub fn set_key(mut self, key_path: impl Into<PathBuf>) -> Self {
         self.key_path = key_path.into();
+        self
+    }
+
+    /// Set the mapping between hostname and (certificate, key) pairs.
+    /// This allows serving different certificates for different hostnames and effectively
+    /// setting up vhosts.
+    ///
+    /// In this case certificates are required to have DNS name set using `subjectAltName`.
+    ///
+    /// This overrides calls to [`set_tls_dir()`](Self::set_tls_dir()), [`set_cert()`](Self::set_cert())
+    /// and [`set_key()`](Self::set_key()).
+    ///
+    /// This method can also be used to setup single host instead of mentioned methods.
+    pub fn set_key_cert_map(mut self, host_cert_key: HashMap<String, (String, String)>) -> Self {
+        self.cert_key_mapping =
+            Some(HashMap::from_iter(host_cert_key.into_iter().map(
+                |(hostname, cert_key)| (hostname, (cert_key.0.into(), cert_key.1.into())),
+            )));
+
         self
     }
 
@@ -326,8 +360,12 @@ impl<A: ToSocketAddrs> Builder<A> {
     }
 
     pub async fn serve(mut self) -> Result<()> {
-        let config =
-            tls_config(&self.cert_path, &self.key_path).context("Failed to create TLS config")?;
+        let config = if self.cert_key_mapping.is_none() {
+            tls_config(&self.cert_path, &self.key_path).context("Failed to create TLS config")?
+        } else {
+            tls_sni_config(&self.cert_key_mapping.unwrap())
+                .context("Failed to create TLS config")?
+        };
 
         let listener = TcpListener::bind(self.addr)
             .await
@@ -414,44 +452,6 @@ async fn send_response_body(body: Body, stream: &mut (impl AsyncWrite + Unpin)) 
     Ok(())
 }
 
-fn tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<Arc<ServerConfig>> {
-    let cert_chain = load_cert_chain(cert_path).context("Failed to load TLS certificate")?;
-    let key_der = load_key(key_path).context("Failed to load TLS key")?;
-
-    let config = ServerConfig::builder()
-        .with_client_cert_verifier(AllowAnonOrSelfsignedClient::new())
-        .with_single_cert(cert_chain, key_der.clone_key())
-        .unwrap();
-
-    Ok(Arc::new(config))
-}
-
-fn load_cert_chain(cert_path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
-    let certs = std::fs::File::open(cert_path)
-        .with_context(|| format!("Failed to open `{:?}`", cert_path))?;
-    let mut certs = BufReader::new(certs);
-    let certs = rustls_pemfile::certs(&mut certs)
-        .collect::<Result<_, std::io::Error>>()
-        .map_err(|_| anyhow!("failed to load certs `{:?}`", cert_path))?;
-
-    Ok(certs)
-}
-
-fn load_key(key_path: &PathBuf) -> Result<PrivateKeyDer<'static>> {
-    let keys = std::fs::File::open(key_path)
-        .with_context(|| format!("Failed to open `{:?}`", key_path))?;
-    let mut keys = BufReader::new(keys);
-    let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut keys)
-        .collect::<Result<_, std::io::Error>>()
-        .map_err(|_| anyhow!("failed to load key `{:?}`", key_path))?;
-
-    ensure!(!keys.is_empty(), "no key found");
-
-    let key = keys.swap_remove(0);
-
-    Ok(PrivateKeyDer::Pkcs8(key))
-}
-
 /// Mime for Gemini documents
 pub const GEMINI_MIME_STR: &str = "text/gemini";
 
@@ -463,72 +463,6 @@ lazy_static! {
 #[deprecated(note = "Use `GEMINI_MIME` instead", since = "0.3.0")]
 pub fn gemini_mime() -> Result<Mime> {
     Ok(GEMINI_MIME.clone())
-}
-
-/// A client cert verifier that accepts all connections
-///
-/// Unfortunately, rustls doesn't provide a ClientCertVerifier that accepts self-signed
-/// certificates, so we need to implement this ourselves.
-#[derive(Debug)]
-struct AllowAnonOrSelfsignedClient {}
-impl AllowAnonOrSelfsignedClient {
-    /// Create a new verifier
-    fn new() -> Arc<Self> {
-        Arc::new(Self {})
-    }
-}
-
-impl ClientCertVerifier for AllowAnonOrSelfsignedClient {
-    fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &[]
-    }
-
-    fn verify_client_cert(
-        &self,
-        _: &CertificateDer,
-        _: &[CertificateDer],
-        _: UnixTime,
-    ) -> Result<ClientCertVerified, Error> {
-        Ok(ClientCertVerified::assertion())
-    }
-
-    fn client_auth_mandatory(&self) -> bool {
-        false
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _mess: &[u8],
-        _cert: &pki_types::CertificateDer,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
-    }
 }
 
 #[cfg(test)]
