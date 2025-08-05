@@ -58,6 +58,11 @@ impl Response {
         Self::success(&mime::TEXT_PLAIN, body)
     }
 
+    pub fn cgi_error_lossy(prompt: impl Cowy<str>) -> Self {
+        let header = ResponseHeader::cgi_error_lossy(prompt);
+        Self::new(header)
+    }
+
     pub fn server_error(reason: impl Cowy<str>) -> Result<Self> {
         let header = ResponseHeader::server_error(reason)?;
         Ok(Self::new(header))

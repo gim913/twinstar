@@ -46,6 +46,13 @@ impl ResponseHeader {
         }
     }
 
+    pub fn cgi_error_lossy(reason: impl Cowy<str>) -> Self {
+        Self {
+            status: Status::CGI_ERROR,
+            meta: Meta::new_lossy(reason),
+        }
+    }
+
     pub fn server_error(reason: impl Cowy<str>) -> Result<Self> {
         Ok(Self {
             status: Status::PERMANENT_FAILURE,
